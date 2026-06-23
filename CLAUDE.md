@@ -35,7 +35,7 @@ This is a **TypeScript MCP (Model Context Protocol) server** that exposes hospit
 **Data flow**: MCP client (e.g. Claude) → stdio → MCP server (`src/index.ts`) → gRPC over TLS → backend (`GRPC_HOST`)
 
 **`src/index.ts`** is the sole production entry point. It:
-1. Loads `proto/hospital_procedure_cost.proto` at startup via `@grpc/proto-loader`
+1. Loads `proto/hospital_code_cost.proto` at startup via `@grpc/proto-loader`
 2. Creates a gRPC client to `GRPC_HOST` (SSL, no auth config — uses system certs)
 3. Registers one MCP tool `get_hospital_procedure_cost` with `code_type` + `code` inputs
 4. Selects transport based on `TRANSPORT` env var:
@@ -43,7 +43,7 @@ This is a **TypeScript MCP (Model Context Protocol) server** that exposes hospit
    - default — connects via `StdioServerTransport` over stdin/stdout
 
 **Proto services** (backend is Scala/ScalaPB):
-- `HospitalProcedureCostService.GetHospitalProcedureCost` — returns cost stats (min/max/avg/median/std_dev) for two hospitals: MCA and UIHC
+- `HospitalCodeCostService.GetHospitalCodeCost` — returns cost stats (min/max/avg/median/std_dev) for two hospitals: MCA and UIHC
 - `PopularCodesService.GetTopCodes` / `GetTopCodesByHospital` — top procedure codes, optionally enriched with cost stats
 
 `popular_codes.proto` defines a `PopularCodesService` that is **not yet wired into the MCP server**.
