@@ -1,6 +1,7 @@
 syntax = "proto3";
 package ai.medprice.api;
 
+import "google/protobuf/timestamp.proto";
 import "llm_provenance.proto";
 import "scalapb/scalapb.proto";
 
@@ -40,6 +41,20 @@ enum CodeSort {
   // (an explicit non-relevance sort still applies to the matching rows).
   // Without a query it behaves like CODE_SORT_SAMPLE_COUNT_DESC.
   CODE_SORT_RELEVANCE = 4;
+  // Fewest hospitals reporting first, to surface rare codes (#1922). Codes
+  // with a hospital count of 0 sort last, so the first pages are not empty rows.
+  CODE_SORT_HOSPITAL_COUNT_ASC = 5;
+  // Smallest network-wide pricing sample size first (sample_count_max, like
+  // CODE_SORT_SAMPLE_COUNT_DESC, so always network-wide). Codes with a sample
+  // count of 0 sort last (#1922).
+  CODE_SORT_SAMPLE_COUNT_ASC = 6;
+  // Highest network-wide median price first (CodeSummary.median_price, #1923).
+  // Codes with no price sort last in every price order.
+  CODE_SORT_MEDIAN_PRICE_DESC = 7;
+  // Lowest median price first.
+  CODE_SORT_MEDIAN_PRICE_ASC = 8;
+  // Widest spread between hospitals first (CodeSummary.price_spread).
+  CODE_SORT_PRICE_SPREAD_DESC = 9;
 }
 
 message CodeSummary {
@@ -81,4 +96,18 @@ message CodeSummary {
   // Provenance of ai_description (see LlmProvenance);
   // unset when ai_description is empty or predates provenance tracking.
   optional LlmProvenance ai_description_provenance = 9;
+  // The code's network-wide price (#1923), unset when no hospital has a
+  // positive average price for it. Always network-wide, like the sort orders
+  // by price, even when ListCodesRequest.hospital_id is set. Taken over all
+  // billing classes, methodologies and settings (GROUP_BY_ALL), so a facility
+  // fee and a professional one are blended. The median of the hospitals'
+  // average prices:
+  optional double median_price = 10;
+  // p90 / p10 of the hospitals' average prices.
+  optional double price_spread = 11;
+  // Hospitals with a positive average price behind both figures.
+  optional int32 priced_hospital_count = 12;
+  // When the snapshot the figures come from was published; they are
+  // recomputed with each snapshot.
+  optional google.protobuf.Timestamp priced_at = 13;
 }

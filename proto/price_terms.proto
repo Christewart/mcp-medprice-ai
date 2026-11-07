@@ -112,6 +112,8 @@ message PriceTermsFilter {
 //   PER_COMBINATION + billing_class = facility  2 rows: #1 and #2.
 //   BILLING_CLASS + methodology = case rate     INVALID_ARGUMENT: grouping by
 //     billing class pooled the methodologies away, so none is left to match.
+//   FACILITY_PLUS_PROFESSIONAL                  1 row: fee schedule, outpatient,
+//     #1 + #3 added (see below); the case rate has no professional row, so none.
 //   ALL, no filter                              1 row: #1, #2 and #3 pooled.
 //   ALL + billing_class = facility              INVALID_ARGUMENT: ALL pooled
 //     the billing classes away too. ALL keeps no terms, so it takes no filter
@@ -126,7 +128,8 @@ message PriceTermsFilter {
 //
 // So the filter may only name the terms the grouping still tells rows apart by:
 // all three for PER_COMBINATION, the billing class for BILLING_CLASS, the
-// methodology for METHODOLOGY, none for ALL. No pool by setting, or by a billing
+// methodology for METHODOLOGY, the methodology and the setting for
+// FACILITY_PLUS_PROFESSIONAL, none for ALL. No pool by setting, or by a billing
 // class and a methodology together, is built.
 enum GroupBy {
   // One row per billing class, methodology and setting, the default.
@@ -140,4 +143,11 @@ enum GroupBy {
   // One row: the figure over every set of terms the hospital files the code
   // under, its terms all unset. It blends billing classes.
   GROUP_BY_ALL = 3;
+  // One row per methodology and setting the hospital files under both the
+  // facility and the professional billing class, the two added (#1791). In the
+  // example: fee schedule, outpatient, avg $100 + $80 = $180. The case rate has
+  // no professional row, so no row. Terms: methodology and setting, no billing
+  // class. The median and standard deviation are those of every facility charge
+  // paired with every professional one.
+  GROUP_BY_FACILITY_PLUS_PROFESSIONAL = 4;
 }

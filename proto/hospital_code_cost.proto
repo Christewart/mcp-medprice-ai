@@ -2,8 +2,6 @@ syntax = "proto3";
 package ai.medprice.api;
 
 import "code_summary.proto";
-import "llm_provenance.proto";
-import "price_distribution.proto";
 import "scalapb/scalapb.proto";
 
 option java_multiple_files = true;
@@ -12,261 +10,6 @@ option java_outer_classname = "HospitalCodeCostProto";
 option (scalapb.options) = {
   scala3_sources: true
 };
-
-message HospitalCodeCostRequest {
-  // Opaque handle from HospitalRecord.hospital_id returned by ListHospitals -
-  // backed by public.hospital.id, the stable id that persists across
-  // revisions. Distinct from public.hospital_revision.id, which is never
-  // exposed over gRPC; the server resolves this to that hospital's latest
-  // revision internally.
-  string hospital_id = 1;
-  // e.g. "MS-DRG"
-  string code_type = 2;
-  // e.g. "652"
-  string code = 3;
-  // Methodology db strings to price, e.g. ["case rate", "per diem"] - see
-  // core.api.Methodology.knownMethodologies. Empty (the common case) means
-  // "aggregate across all methodologies", returning exactly one result
-  // (methodology left empty) - same as the old singular empty-string
-  // convention this field replaces (issue #627). A non-empty list returns
-  // one entry per requested methodology, in request order, each with
-  // found=false when this hospital didn't report that methodology for this
-  // code, rather than omitting it - letting a caller request every known
-  // methodology in one call instead of the 1-aggregate-plus-5-per-methodology
-  // fan-out this replaces. Every element must be one of the known db
-  // strings; an unrecognized one is rejected with INVALID_ARGUMENT.
-  repeated string methodologies = 4;
-  // Optional. Empty (default) resolves hospital_id to its latest revision,
-  // same as before this field existed. When set, must be one of the
-  // revision_ids returned for this hospital_id under
-  // HospitalRecord.revisions - prices that specific past
-  // revision instead of the latest one.
-  string revision_id = 5;
-}
-
-// PROTOTYPE (#870): one (code_type, code) entry in a
-// HospitalCodeCostBatchRequest.
-message CodeRef {
-  // e.g. "MS-DRG"
-  string code_type = 1;
-  // e.g. "652"
-  string code = 2;
-  // Same convention/semantics as HospitalCodeCostRequest.methodologies -
-  // empty (the common case) means "aggregate across all methodologies" for
-  // this code, returning exactly one result; a non-empty list returns one
-  // entry per requested methodology for this code. Every element must be a
-  // known db string (see core.api.Methodology.knownMethodologies); an
-  // unrecognized one is rejected with INVALID_ARGUMENT.
-  repeated string methodologies = 3;
-}
-
-// PROTOTYPE (#870): batch counterpart to HospitalCodeCostRequest - prices
-// several (code_type, code) pairs for one hospital_id in a single RPC,
-// instead of one GetHospitalCodeCost call per code. Aimed at
-// medprice-ai-web's getProcedureCostPointsForHospital (lib/procedureCosts.ts),
-// which currently fires one GetHospitalCodeCost per entry in its ~36-entry
-// PROCEDURES pool on every hospital-detail-page ISR revalidation.
-// CodeRef.methodologies carries the same per-request methodology filter
-// HospitalCodeCostRequest.methodologies does, scoped per code - the common
-// empty-methodologies case (the page fan-out this replaces only ever wants
-// the aggregate) is served by one batched Parquet scan across every code in
-// the request (ParquetCodeCostReader.findCostsForCodes); a code that
-// requests 2+ methodologies falls back to one
-// ParquetCodeCostReader.findCostsByMethodology call for just that code
-// (the same GROUPING SETS query GetHospitalCodeCost's own multi-methodology
-// case uses) since batching a per-code methodology breakdown into one scan
-// isn't implemented yet.
-message HospitalCodeCostBatchRequest {
-  // Same convention as HospitalCodeCostRequest.hospital_id.
-  string hospital_id = 1;
-  // Capped at 100 entries (HospitalCodeCostServiceImpl.MaxBatchCodes) -
-  // rejected with INVALID_ARGUMENT above that, rather than silently
-  // truncated, since this is a public unauthenticated backend and an
-  // uncapped list would let a caller force an arbitrarily wide scan.
-  repeated CodeRef codes = 2;
-  // Same convention as HospitalCodeCostRequest.revision_id.
-  string revision_id = 3;
-}
-
-// PROTOTYPE (#870): one entry per requested CodeRef, in request order -
-// found=false (not omitted) when this hospital has no data for that code,
-// mirroring HospitalCodeCostRequest.methodologies' per-entry found
-// convention.
-message HospitalCodeCostBatchResponse {
-  repeated HospitalCostResult results = 1;
-}
-
-message CodeCostStatsMessage {
-  string code_type = 1;
-  string code = 2;
-  string min = 3;
-  string max = 4;
-  string avg = 5;
-  string median = 6;
-  string std_dev = 7;
-  // Sum, across every payer row contributing to this stat, of CMS's
-  // "Count of Allowed Amounts" (see core.api.CountOfAllowedAmounts) - a
-  // range, not a single number, because CMS's spec de-identifies a
-  // 1-10-remittance count into the literal string "1 through 10" rather
-  // than reporting the real value (issue #719). sample_count_sum_min sums
-  // 1 for each such de-identified row (its known lower bound);
-  // sample_count_sum_max sums 10 for each (its known upper bound). Every
-  // other contributing row (an exact count, or a literal 0) contributes the
-  // same value to both. A hospital reporting no sample_count data at all
-  // for this code yields 0/0/true here - indistinguishable from a genuine
-  // all-zero result, since CMS's spec allows both.
-  int64 sample_count_sum_min = 8;
-  int64 sample_count_sum_max = 9;
-  // True iff sample_count_sum_min == sample_count_sum_max, i.e. every
-  // contributing row was an exact count (or 0) - no de-identified
-  // "1 through 10" row narrowed this to a range.
-  bool sample_count_exact = 10;
-}
-
-message HospitalDescription {
-  string hospital_name = 1;
-  string location = 2;
-  string code_description = 3;
-  string methodology_note = 4;
-  // LLM-generated plain-English name for (code_type, code), backfilled into
-  // public.code_catalog by AiDescriptionBackfillJob (see issue #266).
-  // Unset until that job has processed this code; served unreviewed (no
-  // human spot-check gate) since traffic is low-stakes today - clients
-  // should fall back to code_description when absent.
-  optional string ai_description = 5;
-  // Which model wrote ai_description, with what settings, and when -
-  // so clients can disclose that it is machine-generated. Unset when
-  // ai_description is unset, and for descriptions stored before this was
-  // recorded.
-  optional LlmProvenance ai_description_provenance = 6;
-}
-
-message MethodologyCostResult {
-  // Methodology db string this entry is scoped to, e.g. "case rate" - see
-  // core.api.Methodology. Empty when aggregated across all methodologies
-  // (the request's methodology filter, singular or repeated, was left
-  // empty).
-  string methodology = 1;
-  // proto3 "optional" gives this scalar field explicit presence, so JSON
-  // marshaling (e.g. grpcurl) always emits it, even when false.
-  optional bool found = 2;
-  CodeCostStatsMessage cost = 3;
-  HospitalDescription description = 4;
-}
-
-message HospitalCostResult {
-  string hospital = 1;
-  // True if at least one entry in `results` was found.
-  optional bool found = 2;
-  // Opaque handle backed by public.hospital.id, same convention as
-  // HospitalRecord.hospital_id - lets a client link this result back to a
-  // hospital detail page without a separate ListHospitals lookup.
-  string hospital_id = 3;
-  // One entry per requested methodology, in request order (see
-  // HospitalCodeCostRequest.methodologies) - or, for ListHospitalCodeCosts
-  // (whose methodology filter stays singular) and an empty methodology
-  // filter, exactly one entry. Always non-empty for a resolved hospital -
-  // see issue #627.
-  repeated MethodologyCostResult results = 4;
-}
-
-message ListHospitalCodeCostsRequest {
-  // e.g. "MS-DRG"
-  string code_type = 1;
-  // e.g. "652"
-  string code = 2;
-  // Methodology db string, e.g. "case rate". Empty means "all methodologies".
-  string methodology = 3;
-  // Maximum number of results to return. Defaults to 500, capped at 500 -
-  // comfortably covers the whole current registry (~330 hospitals) in one
-  // call, since an LLM caller can't be relied on to always notice
-  // next_page_token and continue (see issue #163).
-  int32 page_size = 4;
-  // Opaque token returned by a previous ListHospitalCodeCosts call. Empty for the first page.
-  // Only valid with the same code_type/code/methodology/min_sample_count it
-  // was issued for - it is just a result offset, so changing the filter
-  // between pages silently skips or repeats hospitals.
-  string page_token = 5;
-  // Minimum pricing sample size (#858): only hospitals whose
-  // CodeCostStatsMessage.sample_count_sum_min is >= this value are returned,
-  // i.e. hospitals whose price is guaranteed to be backed by at least this
-  // many billing records. Compares against the de-identified range's lower
-  // bound (sample_count_sum_min), so a "1 through 10" row counts as 1, not
-  // 10. 0 (the default) disables the filter and returns every hospital with a
-  // matching entry, same as before this field existed. Pass 1 for "any real
-  // sample data" - most hospitals' filings report no sample counts at all
-  // (0/0), which CodeCostStatsMessage cannot tell apart from a genuine zero,
-  // so a threshold >= 1 also drops both. total_count and next_page_token
-  // describe the filtered set. Negative values are rejected with
-  // INVALID_ARGUMENT.
-  int64 min_sample_count = 6;
-  // Optional case-insensitive hospital-name search (#1370), ranked like
-  // ListHospitalsRequest.query: exact name, name prefix, word-start, then
-  // other substrings (ties by hospital_id). Applied to the hospitals that
-  // report the code. Blank/whitespace-only is treated as unset. total_count
-  // and next_page_token describe the matches only; page_token is only valid
-  // with the same query.
-  string query = 7;
-  // Result ordering (#1370). Unspecified means HOSPITAL_COST_ORDER_RELEVANCE
-  // when query is set and HOSPITAL_COST_ORDER_HOSPITAL_ID otherwise (today's
-  // behavior). Ties break by hospital_id ascending (relevance ties by name
-  // first, like ListHospitals). The ascending price orders list hospitals
-  // with a 0 price last. page_token is only valid with the same order_by.
-  HospitalCostOrder order_by = 8;
-}
-
-enum HospitalCostOrder {
-  HOSPITAL_COST_ORDER_UNSPECIFIED = 0;
-  HOSPITAL_COST_ORDER_HOSPITAL_ID = 1;
-  // Best name match first; only meaningful when query is set (without one it
-  // behaves like HOSPITAL_COST_ORDER_HOSPITAL_ID).
-  HOSPITAL_COST_ORDER_RELEVANCE = 2;
-  // Largest guaranteed pricing sample size (sample_count_sum_min) first.
-  HOSPITAL_COST_ORDER_SAMPLE_COUNT_DESC = 3;
-  // The *_ASC orders list hospitals whose value is 0 (no price filed) last.
-  HOSPITAL_COST_ORDER_AVG_ASC = 4;
-  HOSPITAL_COST_ORDER_AVG_DESC = 5;
-  HOSPITAL_COST_ORDER_MEDIAN_ASC = 6;
-  HOSPITAL_COST_ORDER_MEDIAN_DESC = 7;
-  HOSPITAL_COST_ORDER_MIN_ASC = 8;
-  HOSPITAL_COST_ORDER_MIN_DESC = 9;
-  HOSPITAL_COST_ORDER_MAX_ASC = 10;
-  HOSPITAL_COST_ORDER_MAX_DESC = 11;
-  // By the hospital's std dev for the code (#1378), a measure of how widely
-  // its own filed prices for the code vary. The spread is across every charge
-  // the hospital filed for the code (payers, plans, settings), so a high value
-  // can come from contract mix and billing structure as well as pricing
-  // discipline. It grows with the price level, so it mostly ranks expensive
-  // procedures and hospitals: use COEFFICIENT_OF_VARIATION to compare
-  // hospitals regardless of price level. Hospitals with a 0 std dev (none
-  // filed) list last in both directions.
-  HOSPITAL_COST_ORDER_STD_DEV_ASC = 12;
-  HOSPITAL_COST_ORDER_STD_DEV_DESC = 13;
-  // By std dev / average price (#1378): the same spread relative to the
-  // hospital's own price level, so it is comparable across hospitals and
-  // procedures. A hospital with a 0 std dev or no average price (0) has no
-  // coefficient and lists last in both directions.
-  HOSPITAL_COST_ORDER_COEFFICIENT_OF_VARIATION_ASC = 14;
-  HOSPITAL_COST_ORDER_COEFFICIENT_OF_VARIATION_DESC = 15;
-  // Smallest guaranteed pricing sample size (sample_count_sum_min) first
-  // (#1377). Many hospitals file no sample counts at all (0), which cannot be
-  // told apart from a genuine zero, so a 0 lists last: "fewest samples first"
-  // starts at the smallest real count.
-  HOSPITAL_COST_ORDER_SAMPLE_COUNT_ASC = 16;
-}
-
-message ListHospitalCodeCostsResponse {
-  // One entry per hospital with a matching chargemaster entry (its latest
-  // revision only) - hospitals with no data for this code are simply
-  // omitted, not returned with found=false.
-  repeated HospitalCostResult results = 1;
-  // Empty when there are no more results.
-  string next_page_token = 2;
-  // Total number of matching hospitals across all pages - lets a caller
-  // sanity-check "got N of total_count" instead of only seeing
-  // next_page_token and having to infer there's more (see issue #163).
-  int32 total_count = 3;
-}
 
 message ListCodeTypesRequest {
 }
@@ -312,14 +55,14 @@ message ListCodesRequest {
   // query/code_type/sort it was issued for.
   string query = 5;
   // Optional hospital scoping (#911 part 3): when set, restricts results to
-  // codes that hospital actually reports on its latest revision (a
-  // HospitalRegistryService.ListHospitals hospital_id) - a semi-join against
-  // public.hospital_code_cost_summary's aggregate (methodology IS NULL AND
-  // setting IS NULL) rows for that hospital_stable_id, same "no other
-  // revision with a later last_updated_on" latest-ness check
-  // HospitalCodeCostSummaryDAO.latestOnly already uses. Unset means
-  // network-wide, as before. page_token is only valid with the same
-  // hospital_id it was issued for, same as query/code_type/sort.
+  // codes that hospital files on its latest revision (a
+  // HospitalRegistryService.ListHospitals hospital_id), with the hospital's
+  // own sample counts. Answered as ProviderCodeCostService's
+  // ListHospitalProviderCodes is, from the hospital's provider code-cost file:
+  // UNAVAILABLE while the server has no snapshot open, and a hospital the
+  // snapshot doesn't hold lists no codes. Unset means network-wide.
+  // page_token is only valid with the same hospital_id it was issued for,
+  // same as query/code_type/sort.
   string hospital_id = 6;
 }
 
@@ -331,56 +74,7 @@ message ListCodesResponse {
   int32 total_count = 3;
 }
 
-// Issue #1315: the distribution of every hospital's average price for a code,
-// computed server-side so a client that wants a histogram and a percentile
-// ladder doesn't have to page through every hospital's ListHospitalCodeCosts
-// row (1,864 hospitals, 4 sequential pages, 7-8 s for MS-DRG 788).
-message CodePriceDistributionRequest {
-  // e.g. "MS-DRG"
-  string code_type = 1;
-  // e.g. "788"
-  string code = 2;
-  // Methodology db string, e.g. "case rate". Empty means "all methodologies" -
-  // the same row ListHospitalCodeCosts returns per hospital.
-  string methodology = 3;
-  // Same semantics as ListHospitalCodeCostsRequest.min_sample_count. Negative
-  // values are rejected with INVALID_ARGUMENT.
-  int64 min_sample_count = 4;
-  // Number of histogram bars. 0 means 16. Capped at 200; larger values are
-  // rejected with INVALID_ARGUMENT.
-  int32 bin_count = 5;
-  // Optional price to place on the distribution (a hospital's own value of the
-  // chosen statistic).
-  // When positive, hospitals_below_reference counts the hospitals priced
-  // strictly below it. 0 means none; negative values are rejected with
-  // INVALID_ARGUMENT.
-  double reference_price = 6;
-  // Which per-hospital figure to distribute. Unspecified means the average.
-  // Every price in the response (percentiles, histogram, hospital points,
-  // reference_price) is in terms of this statistic.
-  PriceStatistic statistic = 7;
-}
-
 service HospitalCodeCostService {
-  // Returns cost stats for the single hospital identified by hospital_id -
-  // one result per requested methodology (HospitalCodeCostRequest.methodologies),
-  // or one aggregate result when that filter is left empty. Requesting
-  // several methodologies in one call avoids the 6x
-  // (1-aggregate-plus-5-per-methodology) fan-out a methodology-breakdown
-  // page previously needed (issue #627).
-  rpc GetHospitalCodeCost (HospitalCodeCostRequest) returns (HospitalCostResult);
-  // PROTOTYPE (#870): batch counterpart to GetHospitalCodeCost - prices
-  // several (code_type, code) pairs for one hospital in a single call,
-  // cutting the N-RPC fan-out a hospital-detail page's curated-procedure
-  // cross-linking currently needs down to one.
-  rpc BatchGetHospitalCodeCost (HospitalCodeCostBatchRequest) returns (HospitalCodeCostBatchResponse);
-  // Returns cost stats for every hospital with a matching chargemaster entry
-  // for (code_type, code), paginated - see issue #240.
-  rpc ListHospitalCodeCosts (ListHospitalCodeCostsRequest) returns (ListHospitalCodeCostsResponse);
-  // Returns the distribution of every hospital's average price for (code_type,
-  // code): percentiles, a histogram and the hospitals at each percentile,
-  // computed server-side - see issue #1315.
-  rpc GetCodePriceDistribution (CodePriceDistributionRequest) returns (CodePriceDistributionResponse);
   // Returns every distinct code_type reporting data, for a /codes index page
   // - see issue #286.
   rpc ListCodeTypes (ListCodeTypesRequest) returns (ListCodeTypesResponse);
