@@ -1,6 +1,7 @@
 syntax = "proto3";
 package ai.medprice.api;
 
+import "price_distribution.proto";
 import "price_terms.proto";
 import "scalapb/scalapb.proto";
 
@@ -27,6 +28,36 @@ service PayerCodeCostService {
   // methodology and setting, one page of them.
   rpc ListCodePayerHospitals(ListCodePayerHospitalsRequest)
       returns (ListCodePayerHospitalsResponse);
+  // The distribution of one payer's rate for a code across hospitals, one figure
+  // per hospital (#1995): the code page's national pricing summary, for one
+  // payer. The response is the provider RPC's, so the same cards render it.
+  rpc GetCodePayerPriceDistribution(CodePayerPriceDistributionRequest)
+      returns (CodePayerPriceDistributionResponse);
+  // The distribution of a code's price across payers, one figure per payer
+  // (#2026): how the payers compare, the third view beside the code page's
+  // distribution over every hospital and GetCodePayerPriceDistribution's over
+  // one payer's hospitals.
+  rpc GetCodePayersPriceDistribution(CodePayersPriceDistributionRequest)
+      returns (CodePayersPriceDistributionResponse);
+  // Every payer in the snapshot, independent of a code (#1947), most hospitals
+  // first. About 70, so it is not paginated.
+  rpc ListPayers(ListPayersRequest) returns (ListPayersResponse);
+  // One payer's header: display name and counts (#1947).
+  rpc GetPayer(GetPayerRequest) returns (GetPayerResponse);
+  // The plans a payer is filed under, most hospitals first, one page of them
+  // (#1947).
+  rpc ListPayerPlans(ListPayerPlansRequest) returns (ListPayerPlansResponse);
+  // The payers and plans a hospital files rates under, across all its codes
+  // (#1972), most codes first, one page of them.
+  rpc ListHospitalPlans(ListHospitalPlansRequest)
+      returns (ListHospitalPlansResponse);
+  // A hospital's payers rolled up from its plans (#1972), most plans first.
+  rpc ListHospitalPayers(ListHospitalPayersRequest)
+      returns (ListHospitalPayersResponse);
+  // The hospitals that file a payer, across all codes (#1977), optionally in
+  // one state, one page of them.
+  rpc ListPayerHospitals(ListPayerHospitalsRequest)
+      returns (ListPayerHospitalsResponse);
 }
 
 message ListCodePayersRequest {
@@ -35,6 +66,12 @@ message ListCodePayersRequest {
   // e.g. "99213"
   string code = 2;
   PriceTermsFilter filter = 3;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  string state = 4;
 }
 
 // One payer's rates for a code under one billing class, methodology and
@@ -48,7 +85,8 @@ message PayerSummary {
   string payer_slug = 1;
   int64 hospital_count = 2;
   // Rows behind the stats (each a hospital's plan/billing class/setting).
-  int64 n = 3;
+  // Was `n` (same field number).
+  int64 count_rate = 3;
   string min_rate = 4;
   // Weighted by each plan row's n.
   string avg_rate = 5;
@@ -59,6 +97,18 @@ message PayerSummary {
   PriceTerms terms = 11;
   // Were billing_class, methodology and setting strings before #1567.
   reserved 8, 9, 10;
+  // Population standard deviation of the rate lines behind the summary, the
+  // same lines avg_rate averages (not the spread of the hospitals' averages),
+  // as PlanRate.stddev_rate (#2007). Pooled from each row's own count, average
+  // and standard deviation, which are rounded to cents, so it can differ from
+  // the lines' own by under a cent.
+  string stddev_rate = 12;
+  // CMS's count of allowed amounts behind the lines, summed over the summary's
+  // rows as for PlanRate: the guaranteed minimum and the maximum, and whether
+  // they are the same (0/0 is the same: most payer rows carry no counts).
+  int64 sample_count_sum_min = 13;
+  int64 sample_count_sum_max = 14;
+  bool sample_count_exact = 15;
 }
 
 message ListCodePayersResponse {
@@ -86,13 +136,23 @@ message HospitalCodePayerRatesRequest {
 message PlanRate {
   string payer_slug = 1;
   string plan = 3;
-  int64 n = 6;
+  // The priced rate lines behind the stats. Was `n` (same field number).
+  int64 count_rate = 6;
   string min_rate = 7;
   string avg_rate = 8;
   string median_rate = 9;
   string max_rate = 10;
   // The billing class, methodology and setting the rate was filed under.
   PriceTerms terms = 11;
+  // Population standard deviation of the rate lines, like
+  // CodeCostStatsMessage's std_dev_charge (#1998).
+  string stddev_rate = 12;
+  // CMS's count of allowed amounts behind the lines, summed as for the provider
+  // code costs (#1971): the guaranteed minimum and the maximum, and whether they
+  // are the same (no de-identified "1 through 10" range).
+  int64 sample_count_sum_min = 13;
+  int64 sample_count_sum_max = 14;
+  bool sample_count_exact = 15;
   // Were billing_class, methodology and setting strings before #1567.
   reserved 2, 4, 5;
 }
@@ -124,6 +184,25 @@ enum HospitalPayerRateOrder {
   MIN_ASC = 3;
   MAX_DESC = 4;
   HOSPITAL_NAME = 5;
+  MEDIAN_ASC = 6;
+  MEDIAN_DESC = 7;
+  // The other directions of MIN_ASC and MAX_DESC.
+  MIN_DESC = 8;
+  MAX_ASC = 9;
+  // By the figure's stddev_rate.
+  STD_DEV_ASC = 10;
+  STD_DEV_DESC = 11;
+  // stddev_rate / avg_rate, 0 when the average is 0, as on the provider side
+  // (HospitalProviderCodeCostOrder).
+  COEFFICIENT_OF_VARIATION_ASC = 12;
+  COEFFICIENT_OF_VARIATION_DESC = 13;
+  // By sample_count_sum_min, the guaranteed sample size.
+  SAMPLE_COUNT_ASC = 14;
+  SAMPLE_COUNT_DESC = 15;
+  // Every order but HOSPITAL_NAME lists a figure with a 0 in the sorted statistic
+  // (nothing filed, no spread, no sample count) last, ascending or descending,
+  // as the provider orders do. Most payer rows carry no sample counts (#1973),
+  // so SAMPLE_COUNT_* would otherwise list a page of empty rows first.
 }
 
 message ListCodePayerHospitalsRequest {
@@ -138,6 +217,112 @@ message ListCodePayerHospitalsRequest {
   // Opaque token from a previous call with the same request fields. Empty
   // for the first page.
   string page_token = 7;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  string state = 8;
+  // Only hospitals whose figure under the terms has a sample_count_sum_min of at
+  // least this, as ListCodeProviderHospitalsRequest.min_sample_count: the web
+  // sends it with the STD_DEV_* and COEFFICIENT_OF_VARIATION_* orders, because a
+  // thin filing has an artificially low spread. 0 (the default) keeps every
+  // hospital. INVALID_ARGUMENT when negative. total_count counts the hospitals
+  // kept.
+  int64 min_sample_count = 9;
+}
+
+message CodePayerPriceDistributionRequest {
+  string code_type = 1;
+  string code = 2;
+  // A PayerSummary.payer_slug, e.g. "aetna".
+  string payer_slug = 3;
+  // How a hospital's rates are grouped, as on the provider RPCs
+  // (price_terms.proto's GroupBy): a distribution has one figure per hospital,
+  // so the filter must name every term the grouping keeps (ALL with no filter,
+  // BILLING_CLASS plus a billing class, METHODOLOGY plus a methodology,
+  // PER_COMBINATION, the default, all three), else INVALID_ARGUMENT. The
+  // hospital's plans are pooled, from the stored pool of that grouping, so
+  // every statistic is exact. FACILITY_PLUS_PROFESSIONAL is INVALID_ARGUMENT:
+  // payer rates are not stored under it.
+  GroupBy group_by = 10;
+  // Names the terms of the grouping (see group_by) the figures are for.
+  PriceTermsFilter filter = 4;
+  // Histogram bins; 0 means 16. INVALID_ARGUMENT above 200 or when negative.
+  int32 bin_count = 5;
+  // When positive, the response counts the hospitals priced strictly below it.
+  // INVALID_ARGUMENT when negative.
+  double reference_price = 6;
+  // Which figure of each hospital to distribute; UNSPECIFIED means AVERAGE.
+  // The average, minimum, maximum and median of the rate lines of the
+  // hospital's row (see group_by). With plan_slug the plan's rows are pooled
+  // here (average weighted by rate lines, minimum, maximum), so MEDIAN is then
+  // INVALID_ARGUMENT unless group_by is PER_COMBINATION.
+  PriceStatistic statistic = 7;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them. Empty means every hospital. INVALID_ARGUMENT for
+  // anything that is not a state code.
+  string state = 8;
+  // Optional PayerPlan.plan_slug: distribute that plan's rates alone (the
+  // payer's other plans do not enter any hospital's figure, and a hospital
+  // that does not file the plan is left out). Empty means the payer as a whole,
+  // every plan of a hospital pooled. INVALID_ARGUMENT when not a plan slug.
+  // (field 10 is group_by)
+  string plan_slug = 9;
+}
+
+message CodePayersPriceDistributionRequest {
+  string code_type = 1;
+  string code = 2;
+  // As on GetCodePayerPriceDistribution: the filter names every term the
+  // grouping keeps (ALL with none, BILLING_CLASS plus a billing class,
+  // METHODOLOGY plus a methodology, PER_COMBINATION all three), else
+  // INVALID_ARGUMENT; FACILITY_PLUS_PROFESSIONAL is INVALID_ARGUMENT too. Each
+  // hospital's row is its stored pool of the payer's plans.
+  GroupBy group_by = 3;
+  PriceTermsFilter filter = 4;
+  // Optional two-letter USPS code (as on ListCodePayers): only hospitals with
+  // a location in that state count.
+  string state = 5;
+  // Histogram bins; 0 means 16. INVALID_ARGUMENT above 200 or when negative.
+  int32 bin_count = 6;
+  // When positive, the response counts the payers priced strictly below it.
+  double reference_price = 7;
+  // The figure each payer is reduced to over its hospitals; UNSPECIFIED means
+  // AVERAGE. AVERAGE is weighted by rate lines (the avg_rate of the payers
+  // table), MIN and MAX are the lowest and highest hospital row, MEDIAN is the
+  // median of the hospitals' averages (the table's median_hospital_avg), each
+  // hospital once: not the median of every rate line, which per-hospital rows
+  // cannot give. Every payer counts once, however many hospitals file it.
+  PriceStatistic statistic = 8;
+  // Leaves out payers filed by fewer hospitals than this (0 or 1: none).
+  // INVALID_ARGUMENT when negative.
+  int64 min_hospital_count = 9;
+}
+
+// CodePriceDistributionResponse's hospital points are payers here:
+// hospital_id and each point's hospital_name carry the payer_slug and the
+// payer's display name, location is empty, and hospital_count is the number
+// of payers.
+message CodePayersPriceDistributionResponse {
+  // hospital_count 0 and nothing else set when no payer files the code under
+  // the filter (in the state, with that many hospitals).
+  CodePriceDistributionResponse distribution = 1;
+  string snapshot_id = 2;
+  string code_type = 3;
+  string code = 4;
+}
+
+message CodePayerPriceDistributionResponse {
+  // Same fields and meaning as the provider RPC's response; hospital_count 0 and
+  // nothing else set when the payer has no hospital with a rate for the code
+  // (in the state, under the filter).
+  CodePriceDistributionResponse distribution = 1;
+  string snapshot_id = 2;
+  // The requested code in canonical form.
+  string code_type = 3;
+  string code = 4;
 }
 
 // One hospital's rates for a code from one payer under one billing class,
@@ -149,12 +334,23 @@ message HospitalPayerRate {
   string location = 3;
   string ein = 4;
   int64 plan_count = 5;
-  int64 n = 6;
+  // The priced rate lines behind the figure, across the payer's plans at the
+  // hospital. Was `n` (same field number).
+  int64 count_rate = 6;
   string min_rate = 7;
   string avg_rate = 8;
   string max_rate = 9;
   // As in PayerSummary.
   PriceTerms terms = 13;
+  // Exact over every rate line of the payer's plans at the hospital under these
+  // terms (the median of the lines, not of the plans' medians), and their
+  // population standard deviation (#1998).
+  string median_rate = 14;
+  string stddev_rate = 15;
+  // As in PlanRate.
+  int64 sample_count_sum_min = 16;
+  int64 sample_count_sum_max = 17;
+  bool sample_count_exact = 18;
   // Were billing_class, methodology and setting strings before #1567.
   reserved 10, 11, 12;
 }
@@ -168,4 +364,264 @@ message ListCodePayerHospitalsResponse {
   // The requested code in canonical form.
   string code_type = 5;
   string code = 6;
+}
+
+message ListPayersRequest {
+  // Optional. Leave out the payers filed by fewer hospitals than this, to keep
+  // the long tail (most of the ~70 payers have a handful of hospitals) off an
+  // index page. 0 (default) returns all.
+  int64 min_hospital_count = 1;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  string state = 2;
+}
+
+// One payer of the snapshot, from its payer index. The same rollup over one
+// snapshot, so stable per snapshot_id.
+message PayerListing {
+  // Canonical, e.g. "aetna", "bcbs-tx".
+  string payer_slug = 1;
+  // For display, e.g. "UnitedHealthcare", "Blue Cross Blue Shield (TX)".
+  string display_name = 2;
+  // Hospitals (latest revisions) with at least one rate for the payer.
+  int64 hospital_count = 3;
+  // Distinct codes the payer has a rate for.
+  int64 code_count = 4;
+  // Rate rows: one per hospital, code, billing class, plan, methodology and
+  // setting.
+  int64 payer_rate_rows = 5;
+}
+
+message ListPayersResponse {
+  // Most hospitals first, then by slug.
+  repeated PayerListing payers = 1;
+  string snapshot_id = 2;
+}
+
+message GetPayerRequest {
+  // A PayerListing.payer_slug.
+  string payer_slug = 1;
+  // How the payer's top codes are grouped, and which groups are kept, as for
+  // the provider RPCs (see GroupBy in price_terms.proto): the default lists a
+  // code once per billing class, methodology and setting; BILLING_CLASS and
+  // METHODOLOGY once per billing class (methodology); ALL once. The filter may
+  // name only the terms the grouping keeps (else INVALID_ARGUMENT).
+  // FACILITY_PLUS_PROFESSIONAL is INVALID_ARGUMENT: a payer's rates aren't
+  // added across billing classes.
+  GroupBy group_by = 2;
+  PriceTermsFilter filter = 3;
+  // How many top codes to return. Defaults to 10 (0), capped at 100.
+  int32 top_code_count = 4;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  // Narrows only `payer`'s counts: top_codes stay network-wide (the snapshot
+  // has no per-state code rollup). NOT_FOUND when no hospital in the state
+  // files the payer.
+  string state = 5;
+}
+
+// A payer's code, for one group of the request's grouping.
+message PayerCode {
+  string code_type = 1;
+  string code = 2;
+  // The group: only the terms the request's grouping keeps are set.
+  PriceTerms terms = 3;
+  // Hospitals (latest revisions) with a rate for the payer and code in the
+  // group, counted once each however many sets of terms they file it under.
+  int64 hospital_count = 4;
+  // Rows of the payer-rate files behind the group, and the negotiated rates
+  // hospitals filed that those rows summarize.
+  int64 payer_rate_rows = 5;
+  int64 filed_rate_count = 6;
+}
+
+// NOT_FOUND when no hospital in the snapshot files the payer.
+message GetPayerResponse {
+  PayerListing payer = 1;
+  string snapshot_id = 2;
+  // The payer's codes with the most hospitals first, then by code and terms.
+  // A code appears once per group the filter keeps.
+  repeated PayerCode top_codes = 3;
+  // Two-letter USPS codes of the states with at least one hospital that files
+  // the payer (a hospital counts in every state it has a location in, as with
+  // the `state` filter), sorted. Always the payer's states, whatever `state`
+  // the request named (#1996). Empty on a server that predates the field.
+  repeated string states = 4;
+}
+
+message ListPayerPlansRequest {
+  // A PayerListing.payer_slug.
+  string payer_slug = 1;
+  // Optional. Leave out the plans filed by fewer hospitals than this, to keep
+  // the long tail of one-off plan spellings off a page. 0 (default) returns all.
+  int64 min_hospital_count = 2;
+  // Defaults to 500, capped at 500.
+  int32 page_size = 3;
+  // Opaque token from a previous call with the same request fields. Empty for
+  // the first page.
+  string page_token = 4;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  // A page_token is only valid with the same state it was issued for.
+  string state = 5;
+}
+
+// One plan of a payer. A plan is free text per hospital (PPO, all payor,
+// medicare advantage...), so this groups only spellings that differ in case or
+// punctuation: a plan is the filed string lower-cased, with every run of
+// characters other than letters and digits one hyphen (plan_slug). It is not a
+// plan family across hospitals.
+message PayerPlan {
+  // Empty for rates filed with no plan.
+  string plan_slug = 1;
+  // The spelling filed on the most rows, for display. Empty with no plan.
+  string plan = 2;
+  // Hospitals (latest revisions) that file the plan, and the codes they have a
+  // rate for under it. These are the plan's own, not sums over the payer's
+  // plans: a hospital files several plans.
+  int64 hospital_count = 3;
+  int64 code_count = 4;
+  // Rows of the payer-rate files behind the plan, and the negotiated rates
+  // hospitals filed that those rows summarize.
+  int64 payer_rate_rows = 5;
+  int64 filed_rate_count = 6;
+}
+
+// NOT_FOUND when no hospital in the snapshot files the payer.
+message ListPayerPlansResponse {
+  // Most hospitals first, then by plan_slug.
+  repeated PayerPlan plans = 1;
+  // Empty when there are no more results.
+  string next_page_token = 2;
+  // How many plans match, whatever the page.
+  int32 total_count = 3;
+  string snapshot_id = 4;
+}
+
+message ListHospitalPlansRequest {
+  // A HospitalRecord.hospital_id; its latest revision in the snapshot.
+  string hospital_id = 1;
+  // Optional. Only this payer's plans (a PayerListing.payer_slug).
+  string payer_slug = 2;
+  // Optional. Leave out the plans filed for fewer codes than this, to keep
+  // one-off plan spellings off a page. 0 (default) returns all.
+  int64 min_code_count = 3;
+  // Defaults to 500, capped at 500.
+  int32 page_size = 4;
+  // Opaque token from a previous call with the same request fields. Empty for
+  // the first page.
+  string page_token = 5;
+}
+
+// One payer's plan at one hospital. A plan is free text per hospital (see
+// PayerPlan), so this is the hospital's own spelling, not a plan family.
+message HospitalPlan {
+  string payer_slug = 1;
+  // Empty for rates filed with no plan.
+  string plan_slug = 2;
+  // The spelling filed on the most rows, for display. Empty with no plan.
+  string plan = 3;
+  // The distinct codes the hospital has a rate for under the plan.
+  int64 code_count = 4;
+  // Rows of the payer-rate file behind the plan, and the negotiated rates the
+  // hospital filed that those rows summarize.
+  int64 payer_rate_rows = 5;
+  int64 filed_rate_count = 6;
+}
+
+// NOT_FOUND when the hospital has no payer rates in the snapshot, or malformed
+// hospital_id; INVALID_ARGUMENT for a malformed payer_slug or a negative
+// min_code_count.
+message ListHospitalPlansResponse {
+  // Most codes first, then by payer_slug, plan_slug.
+  repeated HospitalPlan plans = 1;
+  // Empty when there are no more results.
+  string next_page_token = 2;
+  // How many plans match, whatever the page.
+  int32 total_count = 3;
+  string snapshot_id = 4;
+}
+
+message ListHospitalPayersRequest {
+  // A HospitalRecord.hospital_id; its latest revision in the snapshot.
+  string hospital_id = 1;
+}
+
+// One payer at a hospital, rolled up from its plans.
+message HospitalPayer {
+  string payer_slug = 1;
+  // For display, as PayerListing.display_name.
+  string display_name = 2;
+  // How many plans the hospital files the payer under.
+  int64 plan_count = 3;
+  // Sums over the payer's plans. There is no code count: a code is filed under
+  // several plans, so the plans' code counts don't add up to the payer's.
+  int64 payer_rate_rows = 4;
+  int64 filed_rate_count = 5;
+}
+
+// NOT_FOUND when the hospital has no payer rates in the snapshot.
+message ListHospitalPayersResponse {
+  // Most plans first, then by payer_slug.
+  repeated HospitalPayer payers = 1;
+  string snapshot_id = 2;
+}
+
+enum PayerHospitalOrder {
+  PAYER_HOSPITAL_ORDER_UNSPECIFIED = 0; // same as PAYER_HOSPITAL_ORDER_RATE_ROWS_DESC
+  // Most payer-rate rows first: the hospitals filing the most of the payer's
+  // rates. A proxy only: there is no volume or patient-count data.
+  PAYER_HOSPITAL_ORDER_RATE_ROWS_DESC = 1;
+  // Most plans filed under the payer first.
+  PAYER_HOSPITAL_ORDER_PLAN_COUNT_DESC = 2;
+  PAYER_HOSPITAL_ORDER_HOSPITAL_NAME = 3;
+}
+
+message ListPayerHospitalsRequest {
+  // A PayerListing.payer_slug.
+  string payer_slug = 1;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only
+  // hospitals with a location in that state, as on GetPayer. INVALID_ARGUMENT
+  // for anything that is not a state code.
+  string state = 2;
+  PayerHospitalOrder order_by = 3;
+  // Optional. Case-insensitive substring of the hospital name.
+  string query = 4;
+  // Defaults to 500, capped at 500.
+  int32 page_size = 5;
+  // Opaque token from a previous call with the same request fields. Empty for
+  // the first page.
+  string page_token = 6;
+}
+
+// One hospital that files a payer, rolled up from the hospital's plans. As
+// HospitalPayer, with no code count (a code is filed under several plans).
+message PayerHospital {
+  // A HospitalRecord.hospital_id.
+  string hospital_id = 1;
+  string hospital_name = 2;
+  // How many plans the hospital files the payer under.
+  int64 plan_count = 3;
+  // Sums over those plans.
+  int64 payer_rate_rows = 4;
+  int64 filed_rate_count = 5;
+}
+
+// NOT_FOUND when no hospital (in the state, if given) files the payer.
+message ListPayerHospitalsResponse {
+  repeated PayerHospital hospitals = 1;
+  // How many hospitals match, whatever the page.
+  int32 total_count = 2;
+  // Empty when there are no more results.
+  string next_page_token = 3;
+  string snapshot_id = 4;
 }

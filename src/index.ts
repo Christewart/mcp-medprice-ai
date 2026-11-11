@@ -201,6 +201,11 @@ const listHospitalsOutputSchema = {
             description: "Deprecated - use structured_locations instead.",
             items: { type: "string" }
           },
+          states: {
+            type: "array",
+            description: "The hospital's distinct states (USPS codes), sorted; empty only when no location has a state.",
+            items: { type: "string" }
+          },
           structured_locations: {
             type: "array",
             description: "Same addresses as locations, plus geocoded coordinates where available.",
@@ -208,6 +213,7 @@ const listHospitalsOutputSchema = {
               type: "object",
               properties: {
                 address: { type: "string" },
+                state: { type: "string", description: "Two-letter USPS state code of the address; absent when unknown." },
                 lat: { type: "number" },
                 lng: { type: "number" },
                 precision: {
@@ -506,13 +512,37 @@ const CODE_SORTS = [
   "CODE_SORT_PRICE_SPREAD_DESC"
 ] as const
 
+const STATE_SCHEMA = {
+  type: "string",
+  description: "Optional two-letter USPS state code (e.g. \"TX\", case-insensitive): only hospitals with a location in that state are counted. A hospital in several states counts in each, so state figures can add up to more than national ones. Empty means every hospital; anything that is not a state code is rejected as INVALID_ARGUMENT."
+}
+
+const PRICE_STATISTICS = ["PRICE_STATISTIC_UNSPECIFIED", "PRICE_STATISTIC_AVERAGE", "PRICE_STATISTIC_MEDIAN", "PRICE_STATISTIC_MIN", "PRICE_STATISTIC_MAX"] as const
+
+const PAYER_HOSPITAL_ORDERS = [
+  "PAYER_HOSPITAL_ORDER_UNSPECIFIED",
+  "PAYER_HOSPITAL_ORDER_RATE_ROWS_DESC",
+  "PAYER_HOSPITAL_ORDER_PLAN_COUNT_DESC",
+  "PAYER_HOSPITAL_ORDER_HOSPITAL_NAME"
+] as const
+
 const PAYER_ORDERS = [
   "HOSPITAL_PAYER_RATE_ORDER_UNSPECIFIED",
   "AVG_ASC",
   "AVG_DESC",
   "MIN_ASC",
   "MAX_DESC",
-  "HOSPITAL_NAME"
+  "HOSPITAL_NAME",
+  "MEDIAN_ASC",
+  "MEDIAN_DESC",
+  "MIN_DESC",
+  "MAX_ASC",
+  "STD_DEV_ASC",
+  "STD_DEV_DESC",
+  "COEFFICIENT_OF_VARIATION_ASC",
+  "COEFFICIENT_OF_VARIATION_DESC",
+  "SAMPLE_COUNT_ASC",
+  "SAMPLE_COUNT_DESC"
 ] as const
 
 const GROUP_BYS = [
@@ -524,6 +554,15 @@ const GROUP_BYS = [
 ] as const
 
 const groupByZod = z.enum(GROUP_BYS).optional()
+
+// Payer rates are not stored under FACILITY_PLUS_PROFESSIONAL (INVALID_ARGUMENT upstream).
+const PAYER_GROUP_BYS = GROUP_BYS.filter(g => g !== "GROUP_BY_FACILITY_PLUS_PROFESSIONAL")
+const payerGroupByZod = z.enum(PAYER_GROUP_BYS as [string, ...string[]]).optional()
+const payerGroupBySchema = {
+  type: "string",
+  enum: PAYER_GROUP_BYS,
+  description: "How a hospital's rates are grouped (default GROUP_BY_PER_COMBINATION: per billing class + methodology + setting). The filter must name every term the grouping keeps (GROUP_BY_ALL with no filter, GROUP_BY_BILLING_CLASS plus a billing_class, GROUP_BY_METHODOLOGY plus a methodology, per-combination all three), else INVALID_ARGUMENT. GROUP_BY_FACILITY_PLUS_PROFESSIONAL is not available for payer rates."
+}
 
 const groupBySchema = {
   type: "string",
@@ -711,6 +750,10 @@ const toolDefinitions = {
         query: {
           type: "string",
           description: "Optional case-insensitive hospital-name search: matches substrings of hospital_name, ranked exact name, name prefix, word-start, then other substrings (ties by name). Blank is treated as unset, which keeps the default hospital_id ordering. total_count counts matches only."
+        },
+        state: {
+          type: "string",
+          description: "Optional two-letter USPS state code (e.g. \"TX\", case-insensitive): only hospitals with a location in that state (those whose states contain it). total_count counts matches only. Anything that is not a state code is rejected as INVALID_ARGUMENT. page_token is only valid with the same state it was issued for."
         }
       }
     },
@@ -950,6 +993,7 @@ const toolDefinitions = {
         page_size: { type: "integer" },
         page_token: { type: "string", description: "Opaque next_page_token from a previous response; only valid with the same request fields." },
         min_sample_count: { type: "integer", description: "Only rows backed by at least this many billing records (compared against the sample count's lower bound). Negative values are rejected." },
+        state: STATE_SCHEMA,
         query: { type: "string", description: "Optional case-insensitive hospital-name search." }
       },
       required: ["code_type", "code"]
@@ -977,6 +1021,7 @@ const toolDefinitions = {
         min_sample_count: { type: "integer", description: "Only hospitals backed by at least this many billing records. Negative values are rejected." },
         bin_count: { type: "integer", description: "Histogram bars. Defaults to 16, max 200." },
         reference_price: { type: "number", description: "When positive, hospitals_below_reference counts hospitals priced strictly below it." },
+        state: STATE_SCHEMA,
         statistic: {
           type: "string",
           enum: ["PRICE_STATISTIC_AVERAGE", "PRICE_STATISTIC_MEDIAN", "PRICE_STATISTIC_MIN", "PRICE_STATISTIC_MAX"],
@@ -1004,7 +1049,8 @@ const toolDefinitions = {
         },
         code: { type: "string" },
         group_by: groupBySchema,
-        min_sample_count: { type: "integer", description: "Only count hospitals whose figure has at least this many billing records (same rule as list_code_provider_hospitals). Negative values are rejected." }
+        min_sample_count: { type: "integer", description: "Only count hospitals whose figure has at least this many billing records (same rule as list_code_provider_hospitals). Negative values are rejected." },
+        state: STATE_SCHEMA
       },
       required: ["code_type", "code"]
     }
@@ -1026,7 +1072,8 @@ const toolDefinitions = {
           description: "Code system the billing code belongs to, e.g. APR-DRG, CDM, CPT, HCPCS, MS-DRG, RC."
         },
         code: { type: "string" },
-        filter: priceTermsFilterSchema
+        filter: priceTermsFilterSchema,
+        state: STATE_SCHEMA
       },
       required: ["code_type", "code"]
     }
@@ -1074,11 +1121,190 @@ const toolDefinitions = {
         code: { type: "string" },
         payer_slug: { type: "string", description: "A payer_slug from list_code_payers, e.g. \"aetna\"." },
         filter: priceTermsFilterSchema,
-        order_by: { type: "string", enum: [...PAYER_ORDERS], description: "Defaults to AVG_ASC (cheapest average first)." },
+        order_by: { type: "string", enum: [...PAYER_ORDERS], description: "Defaults to AVG_ASC (cheapest average first). STD_DEV_* orders by how widely the payer's rates vary at a hospital, COEFFICIENT_OF_VARIATION_* by that spread relative to the price level (comparable across hospitals); pair those with min_sample_count since thin filings have an artificially low spread." },
+        state: STATE_SCHEMA,
+        min_sample_count: { type: "integer", description: "Only hospitals whose figure has at least this many billing records (sample count lower bound). 0 keeps every hospital; negative is rejected." },
         page_size: { type: "integer" },
         page_token: { type: "string", description: "Opaque next_page_token from a previous response; only valid with the same request fields." }
       },
       required: ["code_type", "code", "payer_slug"]
+    }
+  },
+  get_code_payer_price_distribution: {
+    name: "get_code_payer_price_distribution",
+    title: "Get one payer's price distribution for a code",
+    description: "Distribution (min/p10/q1/median/q3/p90/max, std dev, histogram, nearest hospital per percentile) of one payer's rate for a (code_type, code) across hospitals, one figure per hospital; the payer-specific counterpart to get_code_provider_price_distribution. The filter must name every term the group_by grouping keeps, else INVALID_ARGUMENT. Pass plan_slug (from list_payer_plans) to distribute one plan's rates alone; MEDIAN is then only valid with GROUP_BY_PER_COMBINATION. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        code_type: {
+          type: "string",
+          description: "Code system the billing code belongs to, e.g. APR-DRG, CDM, CPT, HCPCS, MS-DRG, RC."
+        },
+        code: { type: "string" },
+        payer_slug: { type: "string", description: "A payer_slug from list_payers or list_code_payers, e.g. \"aetna\"." },
+        group_by: payerGroupBySchema,
+        filter: priceTermsFilterSchema,
+        state: STATE_SCHEMA,
+        bin_count: { type: "integer", description: "Histogram bars. Defaults to 16, max 200." },
+        reference_price: { type: "number", description: "When positive, the response counts how many are priced strictly below it." },
+        statistic: { type: "string", enum: [...PRICE_STATISTICS], description: "Which figure to distribute (default average)." },
+        plan_slug: { type: "string", description: "Optional plan_slug from list_payer_plans: distribute that plan's rates alone (hospitals not filing the plan are left out). Empty means the payer as a whole." }
+      },
+      required: ["code_type", "code", "payer_slug"]
+    }
+  },
+  get_code_payers_price_distribution: {
+    name: "get_code_payers_price_distribution",
+    title: "Compare payers' prices for a code",
+    description: "Distribution of a code's price across payers, one figure per payer (how the payers compare), the third view beside get_code_provider_price_distribution (over hospitals) and get_code_payer_price_distribution (over one payer's hospitals). The filter must name every term the group_by grouping keeps, else INVALID_ARGUMENT. Each payer is reduced to one figure over its hospitals (average weighted by rate lines; MEDIAN is the median of the hospitals' averages; MIN/MAX the lowest/highest hospital row). Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        code_type: {
+          type: "string",
+          description: "Code system the billing code belongs to, e.g. APR-DRG, CDM, CPT, HCPCS, MS-DRG, RC."
+        },
+        code: { type: "string" },
+        group_by: payerGroupBySchema,
+        filter: priceTermsFilterSchema,
+        state: STATE_SCHEMA,
+        bin_count: { type: "integer", description: "Histogram bars. Defaults to 16, max 200." },
+        reference_price: { type: "number", description: "When positive, the response counts how many are priced strictly below it." },
+        statistic: { type: "string", enum: [...PRICE_STATISTICS], description: "Which figure to distribute (default average)." },
+        min_hospital_count: { type: "integer", description: "Leave out payers filed by fewer hospitals than this (0 or 1: none). Negative is rejected." }
+      },
+      required: ["code_type", "code"]
+    }
+  },
+  list_payers: {
+    name: "list_payers",
+    title: "List payers",
+    description: "Every insurer (payer) in the snapshot, independent of any code, most hospitals first, with display_name, hospital_count, code_count and payer_rate_rows. About 70, so unpaginated. Use the payer_slug with get_payer, list_payer_plans, list_payer_hospitals and the code-level payer tools. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        min_hospital_count: { type: "integer", description: "Leave out payers filed by fewer hospitals than this, to drop the long tail. 0 (default) returns all." },
+        state: STATE_SCHEMA
+      },
+      required: []
+    }
+  },
+  get_payer: {
+    name: "get_payer",
+    title: "Get a payer",
+    description: "One payer's header: display name and counts, plus its top codes (grouped like the provider RPCs; the filter may name only terms the grouping keeps) and the states it appears in. state narrows only the payer's counts: top_codes stay network-wide. NOT_FOUND when no hospital in the state files the payer. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        payer_slug: { type: "string", description: "A payer_slug from list_payers or list_code_payers, e.g. \"aetna\"." },
+        group_by: payerGroupBySchema,
+        filter: priceTermsFilterSchema,
+        top_code_count: { type: "integer", description: "How many top codes to return. Defaults to 10, capped at 100." },
+        state: STATE_SCHEMA
+      },
+      required: ["payer_slug"]
+    }
+  },
+  list_payer_plans: {
+    name: "list_payer_plans",
+    title: "List a payer's plans",
+    description: "The plans a payer is filed under, most hospitals first, paginated: plan_slug, plan name, hospital_count, code_count, payer_rate_rows and filed_rate_count. Use plan_slug with get_code_payer_price_distribution. Includes total_count. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        payer_slug: { type: "string", description: "A payer_slug from list_payers or list_code_payers, e.g. \"aetna\"." },
+        min_hospital_count: { type: "integer", description: "Leave out plans filed by fewer hospitals than this." },
+        state: STATE_SCHEMA,
+        page_size: { type: "integer", description: "Defaults/caps at 500." },
+        page_token: { type: "string", description: "Opaque next_page_token from a previous response; only valid with the same request fields." }
+      },
+      required: ["payer_slug"]
+    }
+  },
+  list_hospital_plans: {
+    name: "list_hospital_plans",
+    title: "List the plans a hospital files rates under",
+    description: "The payers and plans one hospital files negotiated rates under, across all its codes, most codes first, paginated, with code_count, payer_rate_rows and filed_rate_count. Includes total_count. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        hospital_id: { type: "string", description: "A hospital_id from list_hospitals." },
+        payer_slug: { type: "string", description: "Optional: only this payer's plans." },
+        min_code_count: { type: "integer", description: "Leave out plans with fewer codes than this." },
+        page_size: { type: "integer", description: "Defaults/caps at 500." },
+        page_token: { type: "string", description: "Opaque next_page_token from a previous response; only valid with the same request fields." }
+      },
+      required: ["hospital_id"]
+    }
+  },
+  list_hospital_payers: {
+    name: "list_hospital_payers",
+    title: "List the payers a hospital files rates for",
+    description: "A hospital's payers rolled up from its plans, most plans first: display_name, plan_count, payer_rate_rows and filed_rate_count. Unpaginated. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        hospital_id: { type: "string", description: "A hospital_id from list_hospitals." }
+      },
+      required: ["hospital_id"]
+    }
+  },
+  list_payer_hospitals: {
+    name: "list_payer_hospitals",
+    title: "List the hospitals that file a payer",
+    description: "The hospitals that file a payer across all codes, optionally in one state, paginated: plan_count, payer_rate_rows and filed_rate_count per hospital. Includes total_count. For one payer's rates for a specific code use list_code_payer_hospitals. Backed by the hospital-prices serving snapshot; fails with UNAVAILABLE until the server has opened one.",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    },
+    inputSchema: {
+      type: "object",
+      properties: {
+        payer_slug: { type: "string", description: "A payer_slug from list_payers or list_code_payers, e.g. \"aetna\"." },
+        state: STATE_SCHEMA,
+        order_by: { type: "string", enum: [...PAYER_HOSPITAL_ORDERS], description: "Defaults to PAYER_HOSPITAL_ORDER_RATE_ROWS_DESC." },
+        query: { type: "string", description: "Optional case-insensitive hospital-name search." },
+        page_size: { type: "integer", description: "Defaults/caps at 500." },
+        page_token: { type: "string", description: "Opaque next_page_token from a previous response; only valid with the same request fields." }
+      },
+      required: ["payer_slug"]
     }
   },
   list_code_types: {
@@ -1245,7 +1471,8 @@ function createMcpServer(): Server {
         const args = z.object({
           page_size: z.number().int().optional(),
           page_token: z.string().optional(),
-          query: z.string().optional()
+          query: z.string().optional(),
+          state: z.string().optional()
         }).parse(request.params.arguments)
 
         log("INFO", "grpc request", { tool: "list_hospitals" })
@@ -1255,7 +1482,7 @@ function createMcpServer(): Server {
         try {
           response = await new Promise((resolve, reject) => {
             registryClient.ListHospitals(
-              { page_size: args.page_size ?? 0, page_token: args.page_token ?? "", query: args.query ?? "" },
+              { page_size: args.page_size ?? 0, page_token: args.page_token ?? "", query: args.query ?? "", state: args.state ?? "" },
               (err: any, resp: any) => {
                 if (err) reject(err)
                 else resolve(resp)
@@ -1425,7 +1652,8 @@ function createMcpServer(): Server {
           page_token: z.string().optional(),
           group_by: groupByZod,
           min_sample_count: z.number().int().optional(),
-          query: z.string().optional()
+          query: z.string().optional(),
+          state: z.string().optional()
         }).parse(request.params.arguments)
 
         return callProviderRpc("list_code_provider_hospitals", "ListCodeProviderHospitals", {
@@ -1437,7 +1665,8 @@ function createMcpServer(): Server {
           page_token: args.page_token ?? "",
           group_by: args.group_by ?? "GROUP_BY_PER_COMBINATION",
           min_sample_count: args.min_sample_count ?? 0,
-          query: args.query ?? ""
+          query: args.query ?? "",
+          state: args.state ?? ""
         }, { code_type: args.code_type, code: args.code })
       }
 
@@ -1450,13 +1679,8 @@ function createMcpServer(): Server {
           min_sample_count: z.number().int().optional(),
           bin_count: z.number().int().optional(),
           reference_price: z.number().optional(),
-          statistic: z.enum([
-            "PRICE_STATISTIC_UNSPECIFIED",
-            "PRICE_STATISTIC_AVERAGE",
-            "PRICE_STATISTIC_MEDIAN",
-            "PRICE_STATISTIC_MIN",
-            "PRICE_STATISTIC_MAX"
-          ]).optional()
+          statistic: z.enum(PRICE_STATISTICS).optional(),
+          state: z.string().optional()
         }).parse(request.params.arguments)
 
         return callProviderRpc("get_code_provider_price_distribution", "GetCodeProviderPriceDistribution", {
@@ -1467,7 +1691,8 @@ function createMcpServer(): Server {
           min_sample_count: args.min_sample_count ?? 0,
           bin_count: args.bin_count ?? 0,
           reference_price: args.reference_price ?? 0,
-          statistic: args.statistic ?? "PRICE_STATISTIC_UNSPECIFIED"
+          statistic: args.statistic ?? "PRICE_STATISTIC_UNSPECIFIED",
+          state: args.state ?? ""
         }, { code_type: args.code_type, code: args.code })
       }
 
@@ -1476,14 +1701,16 @@ function createMcpServer(): Server {
           code_type: z.string(),
           code: z.string(),
           group_by: groupByZod,
-          min_sample_count: z.number().int().optional()
+          min_sample_count: z.number().int().optional(),
+          state: z.string().optional()
         }).parse(request.params.arguments)
 
         return callProviderRpc("get_code_provider_terms_summary", "GetCodeProviderTermsSummary", {
           code_type: args.code_type,
           code: args.code,
           group_by: args.group_by ?? "GROUP_BY_PER_COMBINATION",
-          min_sample_count: args.min_sample_count ?? 0
+          min_sample_count: args.min_sample_count ?? 0,
+          state: args.state ?? ""
         }, { code_type: args.code_type, code: args.code })
       }
 
@@ -1491,13 +1718,15 @@ function createMcpServer(): Server {
         const args = z.object({
           code_type: z.string(),
           code: z.string(),
-          filter: priceTermsFilterZod
+          filter: priceTermsFilterZod,
+          state: z.string().optional()
         }).parse(request.params.arguments)
 
         return callProviderRpc("list_code_payers", "ListCodePayers", {
           code_type: args.code_type,
           code: args.code,
-          filter: toPriceTermsFilter(args.filter)
+          filter: toPriceTermsFilter(args.filter),
+          state: args.state ?? ""
         }, { code_type: args.code_type, code: args.code }, payerClient)
       }
 
@@ -1527,7 +1756,9 @@ function createMcpServer(): Server {
           filter: priceTermsFilterZod,
           order_by: z.enum(PAYER_ORDERS).optional(),
           page_size: z.number().int().optional(),
-          page_token: z.string().optional()
+          page_token: z.string().optional(),
+          state: z.string().optional(),
+          min_sample_count: z.number().int().optional()
         }).parse(request.params.arguments)
 
         return callProviderRpc("list_code_payer_hospitals", "ListCodePayerHospitals", {
@@ -1537,8 +1768,135 @@ function createMcpServer(): Server {
           filter: toPriceTermsFilter(args.filter),
           order_by: args.order_by ?? "HOSPITAL_PAYER_RATE_ORDER_UNSPECIFIED",
           page_size: args.page_size ?? 0,
-          page_token: args.page_token ?? ""
+          page_token: args.page_token ?? "",
+          state: args.state ?? "",
+          min_sample_count: args.min_sample_count ?? 0
         }, { code_type: args.code_type, code: args.code, payer_slug: args.payer_slug }, payerClient)
+      }
+
+      if (request.params.name === "get_code_payer_price_distribution") {
+        const args = z.object({
+          code_type: z.string(), code: z.string(), payer_slug: z.string(),
+          group_by: payerGroupByZod, filter: priceTermsFilterZod, state: z.string().optional(),
+          bin_count: z.number().int().optional(), reference_price: z.number().optional(),
+          statistic: z.enum(PRICE_STATISTICS).optional(), plan_slug: z.string().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("get_code_payer_price_distribution", "GetCodePayerPriceDistribution", {
+          code_type: args.code_type,
+          code: args.code,
+          payer_slug: args.payer_slug,
+          group_by: args.group_by ?? "GROUP_BY_PER_COMBINATION",
+          filter: toPriceTermsFilter(args.filter),
+          state: args.state ?? "",
+          bin_count: args.bin_count ?? 0,
+          reference_price: args.reference_price ?? 0,
+          statistic: args.statistic ?? "PRICE_STATISTIC_UNSPECIFIED",
+          plan_slug: args.plan_slug ?? ""
+        }, { code_type: args.code_type, code: args.code, payer_slug: args.payer_slug }, payerClient)
+      }
+
+      if (request.params.name === "get_code_payers_price_distribution") {
+        const args = z.object({
+          code_type: z.string(), code: z.string(),
+          group_by: payerGroupByZod, filter: priceTermsFilterZod, state: z.string().optional(),
+          bin_count: z.number().int().optional(), reference_price: z.number().optional(),
+          statistic: z.enum(PRICE_STATISTICS).optional(), min_hospital_count: z.number().int().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("get_code_payers_price_distribution", "GetCodePayersPriceDistribution", {
+          code_type: args.code_type,
+          code: args.code,
+          group_by: args.group_by ?? "GROUP_BY_PER_COMBINATION",
+          filter: toPriceTermsFilter(args.filter),
+          state: args.state ?? "",
+          bin_count: args.bin_count ?? 0,
+          reference_price: args.reference_price ?? 0,
+          statistic: args.statistic ?? "PRICE_STATISTIC_UNSPECIFIED",
+          min_hospital_count: args.min_hospital_count ?? 0
+        }, { code_type: args.code_type, code: args.code }, payerClient)
+      }
+
+      if (request.params.name === "list_payers") {
+        const args = z.object({
+          min_hospital_count: z.number().int().optional(), state: z.string().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("list_payers", "ListPayers", {
+          min_hospital_count: args.min_hospital_count ?? 0,
+          state: args.state ?? ""
+        }, {}, payerClient)
+      }
+
+      if (request.params.name === "get_payer") {
+        const args = z.object({
+          payer_slug: z.string(), group_by: payerGroupByZod, filter: priceTermsFilterZod,
+          top_code_count: z.number().int().optional(), state: z.string().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("get_payer", "GetPayer", {
+          payer_slug: args.payer_slug,
+          group_by: args.group_by ?? "GROUP_BY_PER_COMBINATION",
+          filter: toPriceTermsFilter(args.filter),
+          top_code_count: args.top_code_count ?? 0,
+          state: args.state ?? ""
+        }, { payer_slug: args.payer_slug }, payerClient)
+      }
+
+      if (request.params.name === "list_payer_plans") {
+        const args = z.object({
+          payer_slug: z.string(), min_hospital_count: z.number().int().optional(),
+          state: z.string().optional(), page_size: z.number().int().optional(), page_token: z.string().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("list_payer_plans", "ListPayerPlans", {
+          payer_slug: args.payer_slug,
+          min_hospital_count: args.min_hospital_count ?? 0,
+          state: args.state ?? "",
+          page_size: args.page_size ?? 0,
+          page_token: args.page_token ?? ""
+        }, { payer_slug: args.payer_slug }, payerClient)
+      }
+
+      if (request.params.name === "list_hospital_plans") {
+        const args = z.object({
+          hospital_id: z.string(), payer_slug: z.string().optional(), min_code_count: z.number().int().optional(),
+          page_size: z.number().int().optional(), page_token: z.string().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("list_hospital_plans", "ListHospitalPlans", {
+          hospital_id: args.hospital_id,
+          payer_slug: args.payer_slug ?? "",
+          min_code_count: args.min_code_count ?? 0,
+          page_size: args.page_size ?? 0,
+          page_token: args.page_token ?? ""
+        }, { hospital_id: args.hospital_id }, payerClient)
+      }
+
+      if (request.params.name === "list_hospital_payers") {
+        const args = z.object({
+          hospital_id: z.string()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("list_hospital_payers", "ListHospitalPayers", {
+          hospital_id: args.hospital_id
+        }, { hospital_id: args.hospital_id }, payerClient)
+      }
+
+      if (request.params.name === "list_payer_hospitals") {
+        const args = z.object({
+          payer_slug: z.string(), state: z.string().optional(), order_by: z.enum(PAYER_HOSPITAL_ORDERS).optional(),
+          query: z.string().optional(), page_size: z.number().int().optional(), page_token: z.string().optional()
+        }).parse(request.params.arguments)
+
+        return callProviderRpc("list_payer_hospitals", "ListPayerHospitals", {
+          payer_slug: args.payer_slug,
+          state: args.state ?? "",
+          order_by: args.order_by ?? "PAYER_HOSPITAL_ORDER_UNSPECIFIED",
+          query: args.query ?? "",
+          page_size: args.page_size ?? 0,
+          page_token: args.page_token ?? ""
+        }, { payer_slug: args.payer_slug }, payerClient)
       }
 
       if (request.params.name === "list_code_types") {
