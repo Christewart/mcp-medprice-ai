@@ -269,6 +269,12 @@ message ListCodeProviderHospitalsRequest {
   // blank is no search. total_count and next_page_token count the matches
   // only.
   string query = 9;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  string state = 11;
 }
 
 // One hospital's charges for a code under one group of the request's grouping:
@@ -333,6 +339,12 @@ message CodeProviderPriceDistributionRequest {
   // MIN and MAX span the charges alone (#1645), not the file's own per-item
   // minimum and maximum the legacy RPC widened them to.
   PriceStatistic statistic = 8;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  string state = 11;
 }
 
 message CodeProviderPriceDistributionResponse {
@@ -359,6 +371,12 @@ message GetCodeProviderTermsSummaryRequest {
   // default), one billing class, one methodology, or with all terms one entry
   // for every hospital that charges the code.
   GroupBy group_by = 4;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state are counted. A hospital in several states
+  // counts in each of them, so the states' figures can add up to more than the
+  // national ones. Empty means every hospital. INVALID_ARGUMENT for anything
+  // that is not a state code.
+  string state = 5;
 }
 
 // The hospitals that charge the code under one group of the request's

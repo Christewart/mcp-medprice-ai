@@ -38,6 +38,10 @@ message Location {
   optional double lat = 2;
   optional double lng = 3;
   LocationPrecision precision = 4;
+  // Two-letter USPS code of the address (e.g. "TX"): the state stored with the
+  // address (the geocoder's, else the one the address names), else the one the
+  // address text names. Absent when neither gives one (#1946).
+  optional string state = 5;
 }
 
 message HospitalRecord {
@@ -65,6 +69,9 @@ message HospitalRecord {
   // Structured replacement for `locations` (see issue #190) - same
   // addresses, plus geocoded coordinates where available.
   repeated Location structured_locations = 7;
+  // The hospital's distinct states, sorted by USPS code, one per state any of
+  // its locations is in. Empty only when no location has a state (#1946).
+  repeated string states = 8;
 }
 
 message HospitalRevisionRecord {
@@ -102,6 +109,12 @@ message ListHospitalsRequest {
   // hospital_id ordering. total_count counts matches only. page_token is only
   // valid with the same query it was issued for.
   string query = 3;
+  // Optional two-letter USPS code (e.g. "TX", case-insensitive): only hospitals
+  // with a location in that state, i.e. whose HospitalRecord.states contain
+  // it. total_count counts matches only. Blank means every hospital;
+  // INVALID_ARGUMENT for anything that is not a state code. page_token is only
+  // valid with the same state it was issued for (#1946).
+  string state = 4;
 }
 
 message ListHospitalsResponse {
